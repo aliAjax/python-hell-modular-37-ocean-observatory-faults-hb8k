@@ -1,11 +1,154 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>海底观测网设备故障管理</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:2rem;color:#1f2937}main{max-width:860px;margin:auto}pre{background:#f3f4f6;padding:1rem;border-radius:8px;overflow-x:auto}button{padding:.5rem .8rem;cursor:pointer}</style></head>
-<body><main><h1>海底观测网设备故障管理</h1><p>这是最小演示页面，主要操作通过JSON API完成。</p><p><button onclick="checkHealth()">检查服务状态</button></p><pre id="result">等待操作</pre>
-<h2>常用接口</h2><pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
-GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre></main>
-<script>async function checkHealth(){const r=await fetch('/health');document.getElementById('result').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>海底观测网设备故障管理</title>
+<style>
+:root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1f2937;background:#f8fafc}
+body{margin:0;padding:2rem}main{max-width:1100px;margin:auto}
+h1{margin:.2rem 0 .5rem}h2{margin-top:2rem;border-bottom:1px solid #d1d5db;padding-bottom:.35rem}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:1rem;margin:1rem 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.75rem}
+label{display:flex;flex-direction:column;font-size:.875rem;font-weight:600;gap:.25rem}
+input,select,button,textarea{font:inherit;border:1px solid #cbd5e1;border-radius:6px;padding:.5rem;background:#fff}
+button{background:#0f766e;color:white;border-color:#0f766e;cursor:pointer;font-weight:600}
+button.secondary{background:#fff;color:#0f766e}.row{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.75rem}
+table{width:100%;border-collapse:collapse;font-size:.875rem;background:#fff}th,td{border-bottom:1px solid #e5e7eb;padding:.5rem;text-align:left;vertical-align:top}th{background:#f1f5f9}
+.badge{display:inline-block;border-radius:999px;padding:.1rem .55rem;font-size:.75rem;font-weight:700}.current{background:#dcfce7;color:#166534}.late{background:#fef3c7;color:#92400e}.other{background:#e0e7ff;color:#3730a3}
+pre{background:#0f172a;color:#e2e8f0;padding:1rem;border-radius:8px;overflow:auto;min-height:3rem}
+.muted{color:#64748b;font-size:.875rem}.notice{background:#ecfeff;border-color:#a5f3fc}.wide{grid-column:1/-1}
+</style>
+</head>
+<body><main>
+<h1>海底观测网设备故障管理</h1>
+<p class="muted">录入资产时钟偏移和遥测。系统按 <strong>折算观测时刻 = 设备观测时刻 − clock_offset_seconds</strong> 判断当前读数；更早到达的补传保留为 <span class="badge late">late</span>，不会覆盖当前值。</p>
+
+<section class="card notice">
+<div class="grid">
+<label>用户 ID<input id="userId" value="operator-1"></label>
+<label>角色<select id="role"><option value="operator">operator</option><option value="admin" selected>admin</option><option value="engineer">engineer</option><option value="field">field</option><option value="viewer">viewer</option></select></label>
+</div><div class="row"><button onclick="checkHealth()">检查服务</button><button class="secondary" onclick="refreshAll()">刷新结果</button></div>
+</section>
+
+<section class="card">
+<h2>1. 站点</h2>
+<form id="stationForm" class="grid">
+<label>名称<input name="name" required value="OSN-01"></label>
+<label>区域<input name="region" required value="East Pacific"></label>
+</form><div class="row"><button type="button" onclick="submitForm('stationForm','/api/stations')">录入站点</button></div>
+</section>
+
+<section class="card">
+<h2>2. 资产与时钟偏移</h2>
+<form id="assetForm" class="grid">
+<label>站点 ID<input name="station_id" required></label>
+<label>资产类型<input name="asset_type" required value="sensor"></label>
+<label>序列号<input name="serial_no" required value="S-1"></label>
+<label>最后在线时间<input name="last_seen" required value="2026-09-27T09:00:00Z"></label>
+<label>时钟偏移（秒，可负）<input name="clock_offset_seconds" type="number" step="any" value="600"></label>
+</form><div class="row"><button type="button" onclick="submitForm('assetForm','/api/assets')">录入资产</button></div>
+</section>
+
+<section class="card">
+<h2>3. 遥测录入 / 离线补传</h2>
+<form id="telemetryForm" class="grid">
+<label>资产 ID<input name="asset_id" required></label>
+<label>指标<input name="metric" required value="pressure"></label>
+<label>数值<input name="value" type="number" step="any" required></label>
+<label>设备观测时刻（UTC）<input name="observed_at" required placeholder="2026-09-27T10:10:00Z"></label>
+<label>修订号<input name="revision" type="number" min="1" required value="1"></label>
+</form>
+<p class="muted">同一资产和指标：折算时刻更新时替换当前读数；即使修订号更大，折算时刻更旧也只新增迟到版本。</p>
+<div class="row"><button type="button" onclick="submitForm('telemetryForm','/api/telemetries')">提交遥测</button></div>
+</section>
+
+<section class="card">
+<h2>4. 故障事件与动作</h2>
+<form id="incidentForm" class="grid">
+<label>站点 ID<input name="station_id"></label>
+<label>关联资产 ID<input name="asset_id"></label>
+<label>关联链路 ID（可选）<input name="link_id"></label>
+<label>类型<input name="kind" required value="link_loss"></label>
+<label>严重级别<select name="severity"><option>low</option><option>medium</option><option selected>high</option><option>critical</option></select></label>
+<label>事件开始时间（UTC）<input name="started_at" placeholder="2026-09-27T08:00:00Z"></label>
+<label class="wide">摘要<input name="summary" required value="设备链路中断"></label>
+</form><div class="row"><button type="button" onclick="submitForm('incidentForm','/api/incidents')">录入事件</button></div>
+<div class="grid" style="margin-top:1rem">
+<label>实体 ID<input id="actionEntityId" placeholder="incident 或 telemetry ID"></label>
+<label>动作<input id="actionName" value="diagnose"></label>
+<label class="wide">动作数据（JSON）<textarea id="actionData" rows="3">{}</textarea></label>
+</div><div class="row"><button onclick="submitAction()">提交动作</button><span class="muted">事件流常用动作：diagnose、plan_recovery、start_recovery、resolve（resolve 需要事件开始后的当前遥测）。</span></div>
+</section>
+
+<section class="card">
+<h2>查询结果</h2>
+<div class="row">
+<button class="secondary" onclick="loadList('assets','assetsTable')">查看资产</button>
+<button class="secondary" onclick="loadList('telemetries','telemetriesTable')">查看遥测</button>
+<button class="secondary" onclick="loadList('incidents','incidentsTable')">查看事件</button>
+<button class="secondary" onclick="loadEntityById()">按 ID 查看</button>
+<input id="entityId" placeholder="实体 ID" style="min-width:260px">
+</div>
+<h3>资产</h3><div style="overflow:auto"><table id="assetsTable"></table></div>
+<h3>遥测</h3><div style="overflow:auto"><table id="telemetriesTable"></table></div>
+<h3>事件</h3><div style="overflow:auto"><table id="incidentsTable"></table></div>
+</section>
+
+<section class="card"><h2>最近响应</h2><pre id="result">等待操作</pre></section>
+</main>
+<script>
+function $(id){return document.getElementById(id)}
+function headers(){'use strict';return {'Content-Type':'application/json','X-User-Id':$('userId').value || 'anonymous','X-Role':$('role').value}}
+function show(value){$('result').textContent=JSON.stringify(value,null,2)}
+function esc(value){return String(value ?? '').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function formBody(id){const body={};new FormData($(id)).forEach((value,key)=>{if(value !== '')body[key]=value});return body}
+async function request(path,options){const response=await fetch(path,Object.assign({headers:headers()},options));const value=await response.json();show(value);if(!response.ok)throw new Error(value.error || 'request failed');return value}
+async function submitForm(formId,path){
+  try{
+    const entity=await request(path,{method:'POST',body:JSON.stringify(formBody(formId))});
+    if(formId==='stationForm'){document.querySelector('#assetForm [name=station_id]').value=entity.id}
+    if(formId==='assetForm'){
+      document.querySelector('#telemetryForm [name=asset_id]').value=entity.id;
+      document.querySelector('#incidentForm [name=asset_id]').value=entity.id;
+    }
+    if(formId==='incidentForm'){$('actionEntityId').value=entity.id}
+    await refreshAll();
+  }catch(error){console.error(error)}
+}
+async function submitAction(){
+  try{
+    let data={};
+    const raw=$('actionData').value.trim();
+    if(raw)data=JSON.parse(raw);
+    await request('/api/entities/'+encodeURIComponent($('actionEntityId').value)+'/actions',{
+      method:'POST',body:JSON.stringify({action:$('actionName').value,data})
+    });
+    await refreshAll();
+  }catch(error){show({error:String(error)})}
+}
+async function checkHealth(){show(await (await fetch('/health')).json())}
+async function loadList(kind,tableId){
+  const value=await request('/api/'+kind);const rows=value.items || [];
+  if(kind==='assets'){
+    $(tableId).innerHTML='<tr><th>ID</th><th>状态</th><th>类型</th><th>序列号</th><th>时钟偏移（秒）</th><th>最后在线</th></tr>'+
+      rows.map(x=>`<tr><td>${esc(x.id)}</td><td>${esc(x.status)}</td><td>${esc(x.data.asset_type)}</td><td>${esc(x.data.serial_no)}</td><td>${esc(x.data.clock_offset_seconds ?? 0)}</td><td>${esc(x.data.last_seen)}</td></tr>`).join('');
+  }else if(kind==='telemetries'){
+    $(tableId).innerHTML='<tr><th>ID</th><th>状态</th><th>资产</th><th>指标</th><th>值</th><th>修订号</th><th>设备观测时刻</th><th>折算时刻</th></tr>'+
+      rows.map(x=>`<tr><td>${esc(x.id)}</td><td><span class="badge ${x.status === 'current' ? 'current' : x.status === 'late' ? 'late' : 'other'}">${esc(x.status)}</span></td><td>${esc(x.data.asset_id)}</td><td>${esc(x.data.metric)}</td><td>${esc(x.data.value)}</td><td>${esc(x.data.revision)}</td><td>${esc(x.data.observed_at)}</td><td>${esc(x.data.corrected_observed_at)}</td></tr>`).join('');
+  }else{
+    $(tableId).innerHTML='<tr><th>ID</th><th>状态</th><th>资产</th><th>类型</th><th>级别</th><th>开始时间</th><th>摘要</th></tr>'+
+      rows.map(x=>`<tr><td>${esc(x.id)}</td><td>${esc(x.status)}</td><td>${esc(x.data.asset_id)}</td><td>${esc(x.data.kind)}</td><td>${esc(x.data.severity)}</td><td>${esc(x.data.started_at || x.data.start_at)}</td><td>${esc(x.data.summary)}</td></tr>`).join('');
+  }
+}
+function loadEntityById(){return request('/api/entities/'+encodeURIComponent($('entityId').value))}
+async function refreshAll(){
+  await Promise.all([
+    loadList('assets','assetsTable'),
+    loadList('telemetries','telemetriesTable'),
+    loadList('incidents','incidentsTable')
+  ]).catch(error=>console.error(error));
+}
+refreshAll();
+</script>
+</body></html>

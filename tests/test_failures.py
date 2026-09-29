@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.domain import Actor, ConflictError, InvalidTransition, PermissionDenied
+from src.domain import Actor, ConflictError, PermissionDenied, ValidationError
 from src.repository import SQLiteRepository
 from src.rules import RuleEngine
 from src.service import DomainService
@@ -32,11 +32,81 @@ class FailureTest(unittest.TestCase):
         with self.assertRaises(ConflictError):
             self.service.transition(self.admin, asset["id"], "fail", {"reason": "x"}, 999)
 
-    def test_lower_revision_rejected(self):
+    def test_zero_revision_rejected(self):
         station, asset = self.station_asset()
-        telemetry = self.service.create(self.admin, "telemetry", {"asset_id": asset["id"], "metric": "p", "value": 1, "observed_at": "2026-09-27", "revision": 2})
+        with self.assertRaises(ValidationError):
+            self.service.create(
+                self.admin,
+                "telemetry",
+                {"asset_id": asset["id"], "metric": "p", "value": 1, "observed_at": "2026-09-27", "revision": 0},
+            )
+
+    def test_incident_cannot_resolve_without_current_telemetry_after_start(self):
+        station, asset = self.station_asset()
+        incident = self.service.create(
+            self.admin,
+            "incident",
+            {
+                "station_id": station["id"],
+                "asset_id": asset["id"],
+                "kind": "loss",
+                "severity": "high",
+                "summary": "x",
+                "started_at": "2026-09-27T10:00:00Z",
+            },
+        )
+        for action in ("diagnose", "plan_recovery", "start_recovery"):
+            incident = self.service.transition(self.admin, incident["id"], action)
+        self.service.create(
+            self.admin,
+            "telemetry",
+            {
+                "asset_id": asset["id"],
+                "metric": "p",
+                "value": 1,
+                "observed_at": "2026-09-27T09:59:00Z",
+                "revision": 1,
+            },
+        )
         with self.assertRaises(ConflictError):
-            self.service.transition(self.admin, telemetry["id"], "revise", {"revision": 1})
+            self.service.transition(self.admin, incident["id"], "resolve", {"summary": "done"})
+
+    def test_link_incident_requires_telemetry_for_link_asset(self):
+        station, asset = self.station_asset()
+        link = self.service.create(
+            self.admin,
+            "link",
+            {"station_id": station["id"], "asset_id": asset["id"], "link_type": "fiber", "capacity": 10},
+        )
+        incident = self.service.create(
+            self.admin,
+            "incident",
+            {
+                "station_id": station["id"],
+                "link_id": link["id"],
+                "kind": "link_loss",
+                "severity": "high",
+                "summary": "x",
+                "started_at": "2026-09-27T10:00:00Z",
+            },
+        )
+        for action in ("diagnose", "plan_recovery", "start_recovery"):
+            incident = self.service.transition(self.admin, incident["id"], action)
+        with self.assertRaises(ConflictError):
+            self.service.transition(self.admin, incident["id"], "resolve", {"summary": "done"})
+        self.service.create(
+            self.admin,
+            "telemetry",
+            {
+                "asset_id": asset["id"],
+                "metric": "p",
+                "value": 1,
+                "observed_at": "2026-09-27T10:01:00Z",
+                "revision": 1,
+            },
+        )
+        resolved = self.service.transition(self.admin, incident["id"], "resolve", {"summary": "done"})
+        self.assertEqual(resolved["status"], "resolved")
 
     def test_incident_cannot_resolve_with_active_action(self):
         station, asset = self.station_asset()
