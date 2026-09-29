@@ -1,11 +1,280 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>海底观测网设备故障管理</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:2rem;color:#1f2937}main{max-width:860px;margin:auto}pre{background:#f3f4f6;padding:1rem;border-radius:8px;overflow-x:auto}button{padding:.5rem .8rem;cursor:pointer}</style></head>
-<body><main><h1>海底观测网设备故障管理</h1><p>这是最小演示页面，主要操作通过JSON API完成。</p><p><button onclick="checkHealth()">检查服务状态</button></p><pre id="result">等待操作</pre>
-<h2>常用接口</h2><pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
-GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre></main>
-<script>async function checkHealth(){const r=await fetch('/health');document.getElementById('result').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>海底观测网设备故障管理</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:2rem;color:#1f2937}
+main{max-width:960px;margin:auto}
+h1{margin-bottom:.25rem}
+h2{border-bottom:2px solid #e5e7eb;padding-bottom:.3rem;margin-top:2rem}
+.card{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;margin-bottom:1rem}
+label{display:block;font-size:.85rem;margin:.6rem 0 .2rem;color:#374151}
+input,select{width:100%;padding:.45rem .6rem;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box;font-size:.9rem}
+button{padding:.5rem .9rem;cursor:pointer;border:none;border-radius:6px;background:#2563eb;color:#fff;margin-top:.8rem;font-size:.9rem}
+button.secondary{background:#6b7280}
+button.small{padding:.25rem .6rem;font-size:.8rem;margin:0}
+pre{background:#0f172a;color:#e2e8f0;padding:1rem;border-radius:8px;overflow-x:auto;font-size:.8rem;max-height:340px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+table{border-collapse:collapse;width:100%;font-size:.85rem}
+th,td{border:1px solid #e5e7eb;padding:.35rem .5rem;text-align:left;vertical-align:top}
+.tag{display:inline-block;padding:.1rem .5rem;border-radius:999px;font-size:.75rem;font-weight:600}
+.tag-current{background:#dcfce7;color:#166534}
+.tag-late{background:#fef9c3;color:#854d0e}
+.tag-other{background:#e5e7eb;color:#374151}
+.muted{color:#6b7280;font-size:.85rem}
+.err{color:#b91c1c}
+.ok{color:#166534}
+@media (max-width:720px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<h1>海底观测网设备故障管理</h1>
+<p class="muted">设备时钟可能偏移：遥测按资产时钟偏移折算观测时刻；同一资产+指标只有更新的观测时刻会替换当前读数，晚到的旧读数保留为「迟到版本」。</p>
+<p><button class="secondary" onclick="checkHealth()">检查服务状态</button>
+   <button class="secondary" onclick="loadAll()">刷新全部数据</button>
+   <button onclick="seedDemo()">一键填充演示数据</button>
+   <span id="health" class="muted"></span></p>
+
+<h2>1. 资产与时钟偏移</h2>
+<div class="grid">
+  <div class="card">
+    <strong>新建站点</strong>
+    <label>站点名称</label><input id="stationName" value="OSN-01">
+    <label>区域</label><input id="stationRegion" value="东海">
+    <button onclick="createStation()">创建站点</button>
+  </div>
+  <div class="card">
+    <strong>新建资产</strong>
+    <label>所属站点</label><select id="assetStation"></select>
+    <label>设备类型</label><input id="assetType" value="sensor">
+    <label>序列号</label><input id="assetSerial" value="S-100">
+    <label>时钟偏移（秒；正值=设备钟快，负值=设备钟慢）</label><input id="assetOffset" value="600" type="number" step="any">
+    <button onclick="createAsset()">创建资产</button>
+  </div>
+</div>
+
+<h2>2. 录入遥测</h2>
+<div class="card">
+  <div class="grid">
+    <div>
+      <label>资产</label><select id="telemetryAsset"></select>
+      <label>指标</label><input id="telemetryMetric" value="pressure">
+      <label>观测值</label><input id="telemetryValue" value="10" type="number" step="any">
+    </div>
+    <div>
+      <label>设备观测时刻（ISO-8601，留空=当前时间）</label><input id="telemetryObserved" placeholder="2026-09-27T09:10:00Z">
+      <label>修订号（离线补传编号，不决定当前值）</label><input id="telemetryRevision" value="1" type="number" min="1">
+    </div>
+  </div>
+  <button onclick="createTelemetry()">提交遥测</button>
+  <p class="muted" id="lastSubmit"></p>
+</div>
+
+<h2>3. 遥测结果（当前读数 / 迟到版本）</h2>
+<div id="telemetryTable"></div>
+
+<h2>4. 故障事件</h2>
+<div class="grid">
+  <div class="card">
+    <strong>登记事件</strong>
+    <label>关联资产</label><select id="incidentAsset"></select>
+    <label>故障类型</label><input id="incidentKind" value="link_loss">
+    <label>严重程度</label>
+    <select id="incidentSeverity">
+      <option>low</option><option>medium</option><option selected>high</option><option>critical</option>
+    </select>
+    <label>摘要</label><input id="incidentSummary" value="无数据上报">
+    <button onclick="createIncident()">登记事件</button>
+  </div>
+  <div class="card">
+    <p class="muted">事件在诊断→计划恢复→恢复中→解决的流程里推进。<strong>解决前</strong>，关联资产必须存在一条观测时刻晚于事件开始时间、状态为「当前」的可用遥测；迟到版本不计入。</p>
+    <div id="incidentList"></div>
+  </div>
+</div>
+
+<h2>原始 JSON</h2>
+<pre id="result">等待操作</pre>
+</main>
+
+<script>
+const HEADERS = {"Content-Type":"application/json","X-User-Id":"web-demo","X-Role":"engineer"};
+
+function show(payload){document.getElementById("result").textContent = JSON.stringify(payload,null,2);}
+function fmt(v){return v===undefined||v===null?"":v;}
+async function api(path, options){
+  const r = await fetch(path, options);
+  const body = await r.json();
+  if(!r.ok){throw new Error(body.error || ("HTTP "+r.status));}
+  return body;
+}
+function nowIso(){
+  const d = new Date(Date.now()+2000);
+  return d.toISOString().slice(0,19)+"Z";
+}
+
+async function checkHealth(){
+  try{
+    const body = await api("/health");
+    document.getElementById("health").textContent = "服务状态："+body.status;
+    document.getElementById("health").className = "ok";
+  }catch(e){
+    document.getElementById("health").textContent = "服务不可用："+e.message;
+    document.getElementById("health").className = "err";
+  }
+}
+
+function fillSelect(id, items, labelFor){
+  const sel = document.getElementById(id);
+  const previous = sel.value;
+  sel.innerHTML = "";
+  if(!items.length){
+    const opt = document.createElement("option");
+    opt.textContent = "（暂无，请先创建）";opt.value="";
+    sel.appendChild(opt);return;
+  }
+  for(const item of items){
+    const opt = document.createElement("option");
+    opt.value = item.id;
+    opt.textContent = labelFor(item);
+    sel.appendChild(opt);
+  }
+  if(previous && items.some(i=>i.id===previous)){sel.value=previous;}
+}
+
+function statusTag(status){
+  const cls = status==="current" ? "tag-current" : status==="late" ? "tag-late" : "tag-other";
+  const label = status==="current" ? "当前" : status==="late" ? "迟到版本" : status;
+  return '<span class="tag '+cls+'">'+label+'</span>';
+}
+
+async function loadAll(){
+  const [stations, assets, telemetries, incidents] = await Promise.all([
+    api("/api/stations"), api("/api/assets"),
+    api("/api/telemetries"), api("/api/incidents"),
+  ]);
+  fillSelect("assetStation", stations.items, s=>s.id+" · "+s.data.name);
+  fillSelect("telemetryAsset", assets.items, a=>a.id+" · "+a.data.serial_no+"（偏移 "+fmt(a.data.clock_offset_seconds)+" 秒）");
+  fillSelect("incidentAsset", assets.items, a=>a.id+" · "+a.data.serial_no);
+  renderTelemetry(telemetries.items);
+  renderIncidents(incidents.items);
+  show({stations:stations.items,assets:assets.items,telemetries:telemetries.items,incidents:incidents.items});
+}
+
+function renderTelemetry(items){
+  if(!items.length){
+    document.getElementById("telemetryTable").innerHTML = '<p class="muted">暂无遥测</p>';return;
+  }
+  const rows = items.slice().sort((a,b)=>{
+    const ka = (a.data.asset_id||"")+"|"+(a.data.metric||"")+"|"+(a.data.adjusted_observed_at||"");
+    const kb = (b.data.asset_id||"")+"|"+(b.data.metric||"")+"|"+(b.data.adjusted_observed_at||"");
+    return ka<kb?-1:ka>kb?1:0;
+  });
+  let html = '<table><tr><th>状态</th><th>资产</th><th>指标</th><th>值</th><th>修订号</th><th>设备观测时刻</th><th>折算观测时刻</th></tr>';
+  for(const t of rows){
+    html += "<tr><td>"+statusTag(t.status)+"</td><td>"+fmt(t.data.asset_id)+"</td><td>"+fmt(t.data.metric)+
+      "</td><td>"+fmt(t.data.value)+"</td><td>"+fmt(t.data.revision)+"</td><td>"+fmt(t.data.observed_at)+
+      "</td><td>"+fmt(t.data.adjusted_observed_at)+"</td></tr>";
+  }
+  document.getElementById("telemetryTable").innerHTML = html+"</table>";
+}
+
+const INCIDENT_ACTIONS = ["diagnose","plan_recovery","start_recovery","resolve","close"];
+function renderIncidents(items){
+  if(!items.length){
+    document.getElementById("incidentList").innerHTML = '<p class="muted">暂无事件</p>';return;
+  }
+  let html = '<table><tr><th>事件</th><th>资产</th><th>状态</th><th>开始时间</th><th>操作</th></tr>';
+  for(const inc of items){
+    let next = null;
+    if(inc.status==="open")next="diagnose";
+    else if(inc.status==="diagnosing")next="plan_recovery";
+    else if(inc.status==="recovery_planned")next="start_recovery";
+    else if(inc.status==="recovering")next="resolve";
+    else if(inc.status==="resolved")next="close";
+    const btn = next
+      ? '<button class="small" onclick="advanceIncident(\''+inc.id+'\',\''+next+'\')">'+next+'</button>'
+      : '<span class="muted">已关闭</span>';
+    html += "<tr><td>"+fmt(inc.data.kind)+"</td><td>"+fmt(inc.data.asset_id)+"</td><td>"+statusTag(inc.status)+
+      "</td><td>"+fmt(inc.created_at)+"</td><td>"+btn+"</td></tr>";
+  }
+  document.getElementById("incidentList").innerHTML = html+"</table>";
+}
+
+async function createStation(){
+  const body = await api("/api/stations",{method:"POST",headers:HEADERS,
+    body:JSON.stringify({name:stationName.value,region:stationRegion.value})});
+  show(body);await loadAll();
+}
+async function createAsset(){
+  if(!assetStation.value)return alert("请先创建并选择站点");
+  const body = await api("/api/assets",{method:"POST",headers:HEADERS,body:JSON.stringify({
+    station_id:assetStation.value, asset_type:assetType.value,
+    serial_no:assetSerial.value, last_seen:nowIso(),
+    clock_offset_seconds:parseFloat(assetOffset.value||"0"),
+  })});
+  show(body);await loadAll();
+}
+async function createTelemetry(){
+  if(!telemetryAsset.value)return alert("请先创建并选择资产");
+  const observed = telemetryObserved.value.trim() || nowIso();
+  try{
+    const body = await api("/api/telemetries",{method:"POST",headers:HEADERS,body:JSON.stringify({
+      asset_id:telemetryAsset.value, metric:telemetryMetric.value,
+      value:parseFloat(telemetryValue.value), observed_at:observed,
+      revision:parseInt(telemetryRevision.value,10),
+    })});
+    const note = body.status==="late"
+      ? "已保留为迟到版本（折算时刻更早），当前读数不变。"
+      : "已写入/替换当前读数。";
+    document.getElementById("lastSubmit").textContent = note+" 折算观测时刻："+body.data.adjusted_observed_at;
+    document.getElementById("lastSubmit").className = "muted";
+    show(body);await loadAll();
+  }catch(e){
+    document.getElementById("lastSubmit").textContent = "提交失败："+e.message;
+    document.getElementById("lastSubmit").className = "err";
+  }
+}
+async function createIncident(){
+  if(!incidentAsset.value)return alert("请先创建并选择资产");
+  const body = await api("/api/incidents",{method:"POST",headers:HEADERS,body:JSON.stringify({
+    asset_id:incidentAsset.value, kind:incidentKind.value,
+    severity:incidentSeverity.value, summary:incidentSummary.value,
+  })});
+  show(body);await loadAll();
+}
+async function advanceIncident(id, action){
+  try{
+    const payload = action==="resolve" ? {summary:"service restored"} : {};
+    const body = await api("/api/entities/"+id+"/actions",
+      {method:"POST",headers:HEADERS,body:JSON.stringify({action:action,data:payload})});
+    show(body);await loadAll();
+  }catch(e){alert("操作失败："+e.message);}
+}
+
+async function seedDemo(){
+  try{
+    const station = await api("/api/stations",{method:"POST",headers:HEADERS,
+      body:JSON.stringify({name:"OSN-DEMO",region:"演示区"})});
+    const asset = await api("/api/assets",{method:"POST",headers:HEADERS,body:JSON.stringify({
+      station_id:station.id, asset_type:"sensor", serial_no:"DEMO-1",
+      last_seen:nowIso(), clock_offset_seconds:600})});
+    // 设备钟快 10 分钟：09:10 的读数折算为 09:00。
+    await api("/api/telemetries",{method:"POST",headers:HEADERS,body:JSON.stringify({
+      asset_id:asset.id, metric:"pressure", value:10,
+      observed_at:"2026-09-27T09:10:00Z", revision:1})});
+    // 离线补传晚到：编号更大，但折算时刻更早，应成为迟到版本。
+    await api("/api/telemetries",{method:"POST",headers:HEADERS,body:JSON.stringify({
+      asset_id:asset.id, metric:"pressure", value:99,
+      observed_at:"2026-09-27T08:40:00Z", revision:7})});
+    await loadAll();
+  }catch(e){alert("演示数据创建失败："+e.message);}
+}
+
+checkHealth();
+loadAll().catch(()=>{});
+</script>
+</body>
+</html>

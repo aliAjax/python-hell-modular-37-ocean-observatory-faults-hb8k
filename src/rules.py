@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .domain import ConflictError, InvalidTransition, PermissionDenied, ValidationError
 
@@ -34,11 +34,50 @@ def _number(value, field):
     return number
 
 
+def _signed_number(value, field):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValidationError(field + " must be numeric")
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValidationError(field + " must be a finite number")
+    return number
+
+
+def _parse_timestamp(value, field):
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(field + " must be an ISO-8601 timestamp")
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValidationError(field + " must be an ISO-8601 timestamp")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso_utc(moment):
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _asset_offset(asset):
+    offset = (asset or {}).get("data", {}).get("clock_offset_seconds")
+    return _signed_number(0 if offset in (None, "") else offset, "clock_offset_seconds")
+
+
+def _row_adjusted_time(item):
+    raw = item["data"].get("adjusted_observed_at") or item["data"].get("observed_at")
+    return _parse_timestamp(raw, "adjusted_observed_at")
+
+
 def _validate_asset(data, lookup):
     if not _find_one(lookup, "station", "id", data.get("station_id")):
         raise ValidationError("asset requires station")
     if data.get("clock_offset_seconds") not in (None, ""):
-        _number(data.get("clock_offset_seconds"), "clock_offset_seconds")
+        _signed_number(data.get("clock_offset_seconds"), "clock_offset_seconds")
 
 
 def _validate_link(data, lookup):
@@ -60,10 +99,10 @@ def _validate_telemetry(data, lookup):
         raise ValidationError("revision must be an integer")
     if revision < 1:
         raise ValidationError("revision must be positive")
-    for item in _all(lookup, "telemetry"):
-        if item["data"].get("asset_id") == data.get("asset_id") and item["data"].get("metric") == data.get("metric"):
-            if int(item["data"].get("revision", 0)) >= revision:
-                raise ConflictError("telemetry revision must increase")
+    observed = _parse_timestamp(data.get("observed_at"), "observed_at")
+    data["adjusted_observed_at"] = _iso_utc(observed - timedelta(seconds=_asset_offset(asset)))
+    if data.get("clock_offset_seconds") in (None, ""):
+        data["clock_offset_seconds"] = _asset_offset(asset)
 
 
 def _validate_incident(data, lookup):
@@ -102,14 +141,23 @@ def _validate_gap(data, lookup):
         raise ValidationError("gap window is required")
 
 
-def _revise_telemetry(actor, entity, data, lookup):
-    try:
-        new_revision = int(data.get("revision"))
-    except (TypeError, ValueError):
-        raise ValidationError("revision must be an integer")
-    if new_revision <= int(entity["data"].get("revision", 0)):
-        raise ConflictError("late revision must increase revision number")
-    return {"late_revision": True, "revised_by": actor.user_id}
+def _usable_telemetry_after_incident(incident, lookup):
+    asset_id = incident["data"].get("asset_id")
+    if not asset_id:
+        return True
+    started_at = _parse_timestamp(incident.get("created_at") or incident["data"].get("started_at"), "started_at")
+    for item in _all(lookup, "telemetry"):
+        if item["status"] != "current":
+            continue
+        if item["data"].get("asset_id") != asset_id:
+            continue
+        try:
+            observed_at = _row_adjusted_time(item)
+        except ValidationError:
+            continue
+        if observed_at > started_at:
+            return True
+    return False
 
 
 def _resolve_incident(actor, entity, data, lookup):
@@ -122,6 +170,8 @@ def _resolve_incident(actor, entity, data, lookup):
     assets = [a for a in _all(lookup, "asset") if a["status"] in ("faulty", "offline", "rebooting")]
     if entity["data"].get("asset_id") and any(a["id"] == entity["data"].get("asset_id") for a in assets):
         raise ConflictError("affected asset is still unavailable")
+    if not _usable_telemetry_after_incident(entity, lookup):
+        raise ConflictError("affected asset has no usable telemetry after incident start")
     return {"resolved_by": actor.user_id}
 
 
@@ -212,7 +262,7 @@ class RuleEngine:
     ACTION_REQUIRED = {
         ("station", "degrade"): ("reason",),
         ("link", "fail"): ("reason",),
-        ("telemetry", "revise"): ("revision",),
+        ("telemetry", "revise"): ("value", "observed_at", "revision"),
         ("recovery_action", "succeed"): ("outcome",),
         ("mission", "complete"): ("report",),
         ("gap", "fill"): ("estimate",),
@@ -266,11 +316,17 @@ class RuleEngine:
         "gap": lambda a, d, l: _validate_gap(d, l),
     }
     CUSTOM_TRANSITIONS = {
-        ("telemetry", "revise"): _revise_telemetry,
         ("incident", "resolve"): _resolve_incident,
         ("recovery_action", "succeed"): _complete_action,
         ("mission", "complete"): _complete_mission,
     }
+
+    def prepare_telemetry(self, actor, data, lookup):
+        """Validate a telemetry reading and fold in the asset clock offset."""
+        _ensure_role(actor, self.CREATE_ROLES["telemetry"])
+        _require(data, self.CREATE_REQUIRED["telemetry"])
+        _validate_telemetry(data, lookup)
+        return data
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)

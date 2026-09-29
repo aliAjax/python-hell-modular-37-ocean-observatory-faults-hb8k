@@ -32,11 +32,31 @@ class FailureTest(unittest.TestCase):
         with self.assertRaises(ConflictError):
             self.service.transition(self.admin, asset["id"], "fail", {"reason": "x"}, 999)
 
-    def test_lower_revision_rejected(self):
+    def test_revise_with_earlier_observation_becomes_late(self):
         station, asset = self.station_asset()
-        telemetry = self.service.create(self.admin, "telemetry", {"asset_id": asset["id"], "metric": "p", "value": 1, "observed_at": "2026-09-27", "revision": 2})
-        with self.assertRaises(ConflictError):
-            self.service.transition(self.admin, telemetry["id"], "revise", {"revision": 1})
+        telemetry = self.service.create(self.admin, "telemetry", {"asset_id": asset["id"], "metric": "p", "value": 1, "observed_at": "2026-09-27T10:00:00Z", "revision": 2})
+        late = self.service.transition(
+            self.admin,
+            telemetry["id"],
+            "revise",
+            {"value": 9, "observed_at": "2026-09-27T08:00:00Z", "revision": 1},
+        )
+        self.assertEqual(late["status"], "late")
+        current = self.service.get(telemetry["id"])
+        self.assertEqual(current["status"], "current")
+        self.assertEqual(current["data"]["value"], 1)
+
+    def test_late_version_cannot_be_revised(self):
+        station, asset = self.station_asset()
+        current = self.service.create(self.admin, "telemetry", {"asset_id": asset["id"], "metric": "p", "value": 1, "observed_at": "2026-09-27T10:00:00Z", "revision": 2})
+        late = self.service.create(self.admin, "telemetry", {"asset_id": asset["id"], "metric": "p", "value": 9, "observed_at": "2026-09-27T08:00:00Z", "revision": 1})
+        self.assertEqual(late["status"], "late")
+        with self.assertRaises(InvalidTransition):
+            self.service.transition(self.admin, late["id"], "revise", {"value": 3, "observed_at": "2026-09-27T11:00:00Z", "revision": 3})
+        # The same reading posted normally still replaces the current value.
+        updated = self.service.create(self.admin, "telemetry", {"asset_id": asset["id"], "metric": "p", "value": 3, "observed_at": "2026-09-27T11:00:00Z", "revision": 3})
+        self.assertEqual(updated["id"], current["id"])
+        self.assertEqual(updated["data"]["value"], 3)
 
     def test_incident_cannot_resolve_with_active_action(self):
         station, asset = self.station_asset()
